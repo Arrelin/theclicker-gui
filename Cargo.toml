@@ -3,6 +3,16 @@ name = "theclicker-gui"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev.package."*"]
+opt-level = 2
+
 [dependencies]
 eframe = { version = "0.33.3", features = ["persistence"] }
 theclicker = "0.3.1"
