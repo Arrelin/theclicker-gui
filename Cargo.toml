@@ -2,6 +2,12 @@
 name = "theclicker-gui"
 version = "0.1.0"
 edition = "2024"
+description = "A graphical frontend for theclicker — a Linux autoclicker for X11 and Wayland"
+license = "MIT"
+repository = "https://github.com/Arrelin/theclicker-gui"
+readme = "README.md"
+keywords = ["autoclicker", "gui", "theclicker", "linux"]
+categories = ["gui"]
 
 [profile.release]
 opt-level = 3
