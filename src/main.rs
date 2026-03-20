@@ -1,7 +1,9 @@
 use eframe::egui::{self, Color32, RichText};
 use input_linux::sys::{BTN_LEFT, input_event, EV_KEY};
 use std::io::{BufRead, BufReader};
-use std::sync::mpsc;
+use std::os::unix::io::AsRawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use theclicker::InputDevice;
 
 #[derive(Default)]
@@ -160,6 +162,8 @@ struct App {
     key_rx: Option<mpsc::Receiver<u16>>,
     key_target: Option<KeyTarget>,
     find_rx: Option<mpsc::Receiver<String>>,
+    find_cancel: Option<Arc<AtomicBool>>,
+    key_cancel: Option<Arc<AtomicBool>>,
     status: String,
     tray: Option<ksni::blocking::Handle<ClickerTray>>,
     theclicker_missing: bool,
@@ -189,6 +193,8 @@ impl App {
             key_rx: None,
             key_target: None,
             find_rx: None,
+            find_cancel: None,
+            key_cancel: None,
             status: String::new(),
             tray,
             theclicker_missing,
@@ -208,32 +214,60 @@ impl App {
             }
             Action::FindMouse => {
                 let (tx, rx) = mpsc::channel();
-                for device in InputDevice::devices() {
-                    let tx = tx.clone();
-                    let base_name = {
-                        let display = clean_name(&device.name).to_string();
-                        display
-                            .strip_suffix(&format!("-{}", device.filename))
-                            .unwrap_or(&display)
-                            .to_string()
-                    };
-                    std::thread::spawn(move || {
-                        let mut events: [input_event; 1] = unsafe { std::mem::zeroed() };
-                        loop {
-                            let Ok(len) = device.read(&mut events) else { break };
-                            for event in &events[..len] {
-                                if event.type_ == EV_KEY as u16
-                                    && event.code == BTN_LEFT as u16
-                                    && event.value == 1
-                                {
-                                    let _ = tx.send(base_name.clone());
-                                    return;
+                let stop = Arc::new(AtomicBool::new(false));
+                let stop_clone = stop.clone();
+                let devices = InputDevice::devices();
+                std::thread::spawn(move || {
+                    let named: Vec<_> = devices
+                        .into_iter()
+                        .map(|device| {
+                            let display = clean_name(&device.name).to_string();
+                            let base_name = display
+                                .strip_suffix(&format!("-{}", device.filename))
+                                .unwrap_or(&display)
+                                .to_string();
+                            (device, base_name)
+                        })
+                        .collect();
+                    let mut pollfds: Vec<libc::pollfd> = named
+                        .iter()
+                        .map(|(d, _)| libc::pollfd {
+                            fd: d.handler.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        })
+                        .collect();
+                    let mut events: [input_event; 1] = unsafe { std::mem::zeroed() };
+                    loop {
+                        if stop_clone.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let ret = unsafe {
+                            libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, 100)
+                        };
+                        if ret < 0 {
+                            return;
+                        }
+                        for (i, pfd) in pollfds.iter_mut().enumerate() {
+                            if pfd.revents & libc::POLLIN != 0 {
+                                pfd.revents = 0;
+                                if let Ok(len) = named[i].0.read(&mut events) {
+                                    for event in &events[..len] {
+                                        if event.type_ == EV_KEY as u16
+                                            && event.code == BTN_LEFT as u16
+                                            && event.value == 1
+                                        {
+                                            let _ = tx.send(named[i].1.clone());
+                                            return;
+                                        }
+                                    }
                                 }
                             }
                         }
-                    });
-                }
+                    }
+                });
                 self.find_rx = Some(rx);
+                self.find_cancel = Some(stop);
                 self.screen = Screen::FindMouse;
             }
             Action::StartCapture(target) => {
@@ -242,26 +276,44 @@ impl App {
                     return;
                 }
                 let (tx, rx) = mpsc::channel();
+                let stop = Arc::new(AtomicBool::new(false));
+                let stop_clone = stop.clone();
                 let name = clean_name(&self.config.device_name).to_string();
                 std::thread::spawn(move || {
                     let Some(device) = InputDevice::find_device(&name) else {
                         return;
                     };
                     device.empty_read_buffer();
+                    let mut pollfd = libc::pollfd {
+                        fd: device.handler.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
                     let mut events: [input_event; 1] = unsafe { std::mem::zeroed() };
                     loop {
-                        let Ok(len) = device.read(&mut events) else {
-                            break;
-                        };
-                        for event in &events[..len] {
-                            if event.type_ == EV_KEY as u16 && event.value == 1 {
-                                let _ = tx.send(event.code);
+                        if stop_clone.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        let ret = unsafe { libc::poll(&mut pollfd, 1, 100) };
+                        if ret < 0 {
+                            return;
+                        }
+                        if pollfd.revents & libc::POLLIN != 0 {
+                            pollfd.revents = 0;
+                            let Ok(len) = device.read(&mut events) else {
                                 return;
+                            };
+                            for event in &events[..len] {
+                                if event.type_ == EV_KEY as u16 && event.value == 1 {
+                                    let _ = tx.send(event.code);
+                                    return;
+                                }
                             }
                         }
                     }
                 });
                 self.key_rx = Some(rx);
+                self.key_cancel = Some(stop);
                 self.key_target = Some(target);
                 self.screen = Screen::KeyCapture;
                 self.status.clear();
@@ -433,6 +485,7 @@ impl eframe::App for App {
                 if let Ok(base_name) = rx.try_recv() {
                     self.config.device_name = base_name;
                     self.find_rx = None;
+                    self.find_cancel = None;
                     self.screen = Screen::Config;
                 }
             }
@@ -450,6 +503,7 @@ impl eframe::App for App {
                         None => {}
                     }
                     self.key_rx = None;
+                    self.key_cancel = None;
                     self.key_target = None;
                     self.screen = Screen::Config;
                 }
@@ -482,18 +536,95 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show(ctx, |ui| match self.screen {
             Screen::Running => {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(100.0);
-                    ui.heading(RichText::new("TheClicker is Running").color(Color32::GREEN));
-                    ui.add_space(24.0);
-                    ui.label(RichText::new("Autoclicker active. Press Stop to terminate.").weak());
-                    ui.add_space(24.0);
-                    if ui
-                        .add(egui::Button::new(RichText::new("  Stop  ").size(16.0)))
-                        .clicked()
-                    {
-                        action = Some(Action::Stop);
-                    }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(16.0);
+                        ui.horizontal(|ui| {
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(14.0, 14.0),
+                                egui::Sense::hover(),
+                            );
+                            ui.painter().circle_filled(rect.center(), 6.0, Color32::GREEN);
+                            ui.heading(RichText::new("TheClicker is Running").color(Color32::GREEN));
+                        });
+                        ui.add_space(16.0);
+                    });
+
+                    let cfg = &self.config;
+
+                    ui.group(|ui| {
+                        ui.label(RichText::new("Device").strong());
+                        ui.add_space(2.0);
+                        ui.label(RichText::new(&cfg.device_name).monospace());
+                    });
+
+                    ui.add_space(6.0);
+
+                    ui.group(|ui| {
+                        ui.label(RichText::new("Bindings").strong());
+                        ui.add_space(2.0);
+                        egui::Grid::new("running_bindings")
+                            .num_columns(2)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                if cfg.enable_left {
+                                    ui.label("Left click:");
+                                    ui.label(RichText::new(cfg.left_bind.map(key_label).unwrap_or_else(|| "—".into())).monospace());
+                                    ui.end_row();
+                                }
+                                if cfg.enable_middle {
+                                    ui.label("Middle click:");
+                                    ui.label(RichText::new(cfg.middle_bind.map(key_label).unwrap_or_else(|| "—".into())).monospace());
+                                    ui.end_row();
+                                }
+                                if cfg.enable_right {
+                                    ui.label("Right click:");
+                                    ui.label(RichText::new(cfg.right_bind.map(key_label).unwrap_or_else(|| "—".into())).monospace());
+                                    ui.end_row();
+                                }
+                                if cfg.enable_lock_unlock {
+                                    ui.label("Lock/Unlock:");
+                                    ui.label(RichText::new(cfg.lock_unlock_bind.map(key_label).unwrap_or_else(|| "—".into())).monospace());
+                                    ui.end_row();
+                                }
+                            });
+                    });
+
+                    ui.add_space(6.0);
+
+                    ui.group(|ui| {
+                        ui.label(RichText::new("Settings").strong());
+                        ui.add_space(2.0);
+                        egui::Grid::new("running_settings")
+                            .num_columns(2)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("Cooldown:");
+                                ui.label(RichText::new(format!("{} ms", cfg.cooldown)).monospace());
+                                ui.end_row();
+                                if cfg.cooldown_press_release > 0 {
+                                    ui.label("Press-release gap:");
+                                    ui.label(RichText::new(format!("{} ms", cfg.cooldown_press_release)).monospace());
+                                    ui.end_row();
+                                }
+                                ui.label("Hold mode:");
+                                ui.label(RichText::new(if cfg.hold { "on" } else { "off" }).monospace());
+                                ui.end_row();
+                                ui.label("Grab device:");
+                                ui.label(RichText::new(if cfg.grab { "on" } else { "off" }).monospace());
+                                ui.end_row();
+                            });
+                    });
+
+                    ui.add_space(16.0);
+                    ui.vertical_centered(|ui| {
+                        if ui
+                            .add(egui::Button::new(RichText::new("  Stop  ").size(16.0)))
+                            .clicked()
+                        {
+                            action = Some(Action::Stop);
+                        }
+                    });
                 });
             }
             Screen::KeyCapture => {
@@ -511,6 +642,9 @@ impl eframe::App for App {
                     );
                     ui.add_space(24.0);
                     if ui.button("Cancel").clicked() {
+                        if let Some(cancel) = self.key_cancel.take() {
+                            cancel.store(true, Ordering::Relaxed);
+                        }
                         self.key_rx = None;
                         self.key_target = None;
                         self.screen = Screen::Config;
@@ -525,6 +659,9 @@ impl eframe::App for App {
                     ui.label(RichText::new("The device that produces the click will be selected").weak().italics());
                     ui.add_space(24.0);
                     if ui.button("Cancel").clicked() {
+                        if let Some(cancel) = self.find_cancel.take() {
+                            cancel.store(true, Ordering::Relaxed);
+                        }
                         self.find_rx = None;
                         self.screen = Screen::Config;
                     }

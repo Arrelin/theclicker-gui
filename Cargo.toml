@@ -1,6 +1,6 @@
 [package]
 name = "theclicker-gui"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A graphical frontend for theclicker — a Linux autoclicker for X11 and Wayland"
 license = "MIT"
@@ -20,8 +20,9 @@ panic = "abort"
 opt-level = 2
 
 [dependencies]
-eframe = { version = "0.33.3", features = ["persistence"] }
+eframe = { version = "0.33.3", default-features = false, features = ["glow", "wayland", "x11", "default_fonts", "persistence"] }
 theclicker = "0.3.1"
 serde = { version = "1.0.228", features = ["derive"] }
 input-linux = "0.7.1"
 ksni = { version = "0.3.3", default-features = false, features = ["blocking", "async-io"] }
+libc = "0.2.183"
