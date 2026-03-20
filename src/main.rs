@@ -175,6 +175,12 @@ impl App {
         tray: Option<ksni::blocking::Handle<ClickerTray>>,
     ) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.remove("NotoEmoji-Regular");
+        for family in fonts.families.values_mut() {
+            family.retain(|f| f != "NotoEmoji-Regular");
+        }
+        cc.egui_ctx.set_fonts(fonts);
         let config = cc
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
