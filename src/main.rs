@@ -6,11 +6,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use theclicker::InputDevice;
 
-#[derive(Default)]
+enum TrayAction {
+    Start,
+    Stop,
+    Quit,
+}
+
 struct ClickerTray {
     running: bool,
     locked: bool,
     clicking: bool,
+    tx: mpsc::Sender<TrayAction>,
+    ctx: egui::Context,
 }
 
 impl ksni::Tray for ClickerTray {
@@ -51,21 +58,60 @@ impl ksni::Tray for ClickerTray {
             ..Default::default()
         }
     }
+    
+    fn activate(&mut self, _x: i32, _y: i32) {
+        // On X11: Minimized(false) + Focus raise the window normally.
+        // On Wayland: both are no-ops in winit; RequestUserAttention uses xdg-activation-v1
+        // which raises the window on permissive compositors (KDE, Hyprland, Sway).
+        // GNOME Wayland will likely only flash the taskbar due to strict focus stealing policy.
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+            egui::UserAttentionType::Informational,
+        ));
+        self.ctx.request_repaint();
+    }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
-        vec![StandardItem {
-            label: "Quit".into(),
-            activate: Box::new(|_| std::process::exit(0)),
-            ..Default::default()
-        }
-        .into()]
+        vec![
+            StandardItem {
+                label: "Start".into(),
+                enabled: !self.running,
+                activate: Box::new(|this: &mut Self| {
+                    let _ = this.tx.send(TrayAction::Start);
+                    this.ctx.request_repaint();
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Stop".into(),
+                enabled: self.running,
+                activate: Box::new(|this: &mut Self| {
+                    let _ = this.tx.send(TrayAction::Stop);
+                    this.ctx.request_repaint();
+                }),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            StandardItem {
+                label: "Quit".into(),
+                activate: Box::new(|this: &mut Self| {
+                    let _ = this.tx.send(TrayAction::Quit);
+                    this.ctx.request_repaint();
+                }),
+                ..Default::default()
+            }
+            .into(),
+        ]
     }
 }
 
 fn main() -> eframe::Result<()> {
     use ksni::blocking::TrayMethods as _;
-    let tray = ClickerTray::default().spawn().ok();
+    let (tray_tx, tray_rx) = mpsc::channel::<TrayAction>();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -76,7 +122,19 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "TheClicker GUI",
         options,
-        Box::new(move |cc| Ok(Box::new(App::new(cc, tray)))),
+        Box::new(move |cc| {
+            let ctx = cc.egui_ctx.clone();
+            let tray = ClickerTray {
+                running: false,
+                locked: false,
+                clicking: false,
+                tx: tray_tx,
+                ctx,
+            }
+            .spawn()
+            .ok();
+            Ok(Box::new(App::new(cc, tray, tray_rx)))
+        }),
     )
 }
 
@@ -166,6 +224,7 @@ struct App {
     key_cancel: Option<Arc<AtomicBool>>,
     status: String,
     tray: Option<ksni::blocking::Handle<ClickerTray>>,
+    tray_rx: mpsc::Receiver<TrayAction>,
     theclicker_missing: bool,
 }
 
@@ -173,6 +232,7 @@ impl App {
     fn new(
         cc: &eframe::CreationContext<'_>,
         tray: Option<ksni::blocking::Handle<ClickerTray>>,
+        tray_rx: mpsc::Receiver<TrayAction>,
     ) -> Self {
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let mut fonts = egui::FontDefinitions::default();
@@ -203,6 +263,7 @@ impl App {
             key_cancel: None,
             status: String::new(),
             tray,
+            tray_rx,
             theclicker_missing,
         }
     }
@@ -486,6 +547,14 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        while let Ok(ta) = self.tray_rx.try_recv() {
+            match ta {
+                TrayAction::Start => self.handle_action(Action::Launch),
+                TrayAction::Stop => self.handle_action(Action::Stop),
+                TrayAction::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            }
+        }
+
         if self.screen == Screen::FindMouse {
             if let Some(rx) = &self.find_rx {
                 if let Ok(base_name) = rx.try_recv() {
