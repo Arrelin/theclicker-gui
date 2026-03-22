@@ -109,7 +109,27 @@ impl ksni::Tray for ClickerTray {
     }
 }
 
+fn init_logger() {
+    let level = std::env::args()
+        .skip_while(|a| a != "--log-level")
+        .nth(1)
+        .or_else(|| {
+            std::env::args()
+                .find_map(|a| a.strip_prefix("--log-level=").map(str::to_string))
+        })
+        .unwrap_or_else(|| "warn".to_string());
+
+    let filter = level.parse::<log::LevelFilter>().unwrap_or(log::LevelFilter::Warn);
+    env_logger::Builder::new()
+        .filter_level(filter)
+        .format_timestamp_millis()
+        .init();
+}
+
 fn main() -> eframe::Result<()> {
+    init_logger();
+    log::info!("Starting theclicker-gui");
+
     use ksni::blocking::TrayMethods as _;
     let (tray_tx, tray_rx) = mpsc::channel::<TrayAction>();
 
@@ -420,8 +440,10 @@ impl App {
                 }
                 cmd.stdout(std::process::Stdio::piped());
                 cmd.stderr(std::process::Stdio::null());
+                log::debug!("Launching theclicker with args: {:?}", cmd.get_args().collect::<Vec<_>>());
                 match cmd.spawn() {
                     Ok(mut child) => {
+                        log::info!("theclicker started (pid {})", child.id());
                         if let Some(stdout) = child.stdout.take() {
                             let tray = self.tray.clone();
                             std::thread::spawn(move || {
@@ -429,6 +451,7 @@ impl App {
                                 let (mut prev_locked, mut prev_clicking) = (false, false);
                                 for line in reader.lines() {
                                     let Ok(line) = line else { break };
+                                    log::trace!("theclicker: {line}");
                                     if line.starts_with("Active:") {
                                         let locked = line.contains("LOCKED");
                                         let clicking = line.contains("left")
@@ -461,12 +484,14 @@ impl App {
                         self.status = "Running".to_string();
                     }
                     Err(e) => {
+                        log::error!("Failed to start theclicker: {e}");
                         self.status = format!("Failed to start: {e}");
                     }
                 }
             }
             Action::Stop => {
                 if let Some(mut child) = self.child.take() {
+                    log::info!("Stopping theclicker (pid {})", child.id());
                     let _ = child.kill();
                     let _ = child.wait();
                 }
