@@ -25,6 +25,23 @@ impl ksni::Tray for ClickerTray {
         "theclicker-gui".into()
     }
 
+    fn activate(&mut self, _x: i32, _y: i32) {
+        // On X11: Minimized(false) + Focus raise the window normally.
+        // On Wayland: both are no-ops in winit; RequestUserAttention uses xdg-activation-v1
+        // which raises the window on permissive compositors (KDE, Hyprland, Sway).
+        // GNOME Wayland will likely only flash the taskbar due to strict focus stealing policy.
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+            egui::UserAttentionType::Informational,
+        ));
+        self.ctx.request_repaint();
+    }
+
+    fn title(&self) -> String {
+        "TheClicker".into()
+    }
+
     fn icon_name(&self) -> String {
         if !self.running {
             "input-mouse"
@@ -36,10 +53,6 @@ impl ksni::Tray for ClickerTray {
             "changes-allow"
         }
         .into()
-    }
-
-    fn title(&self) -> String {
-        "TheClicker".into()
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
@@ -57,19 +70,6 @@ impl ksni::Tray for ClickerTray {
             description: description.into(),
             ..Default::default()
         }
-    }
-    
-    fn activate(&mut self, _x: i32, _y: i32) {
-        // On X11: Minimized(false) + Focus raise the window normally.
-        // On Wayland: both are no-ops in winit; RequestUserAttention uses xdg-activation-v1
-        // which raises the window on permissive compositors (KDE, Hyprland, Sway).
-        // GNOME Wayland will likely only flash the taskbar due to strict focus stealing policy.
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
-            egui::UserAttentionType::Informational,
-        ));
-        self.ctx.request_repaint();
     }
 
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
