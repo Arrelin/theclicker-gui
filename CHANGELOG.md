@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.4]
+
+### Added
+
+- Global Start/Stop hotkey: bind any key combination (including Ctrl, Alt, Shift, Super modifiers) to toggle the clicker from anywhere
+
 ## [0.1.3]
 
 ### Added

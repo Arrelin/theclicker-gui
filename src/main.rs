@@ -158,6 +158,12 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+#[derive(serde::Deserialize, serde::Serialize, Clone, Copy, PartialEq)]
+struct HotkeyBind {
+    key: u16,
+    mods: u8,
+}
+
 #[derive(serde::Deserialize, serde::Serialize, Clone)]
 #[serde(default)]
 struct Config {
@@ -174,6 +180,8 @@ struct Config {
     right_bind: Option<u16>,
     hold: bool,
     grab: bool,
+    enable_hotkey: bool,
+    hotkey_bind: Option<HotkeyBind>,
 }
 
 impl Default for Config {
@@ -192,6 +200,8 @@ impl Default for Config {
             right_bind: None,
             hold: true,
             grab: true,
+            enable_hotkey: false,
+            hotkey_bind: None,
         }
     }
 }
@@ -202,6 +212,7 @@ enum KeyTarget {
     Left,
     Middle,
     Right,
+    HotkeyStartStop,
 }
 
 impl KeyTarget {
@@ -211,6 +222,7 @@ impl KeyTarget {
             KeyTarget::Left => "Left click",
             KeyTarget::Middle => "Middle click",
             KeyTarget::Right => "Right click",
+            KeyTarget::HotkeyStartStop => "Start/Stop hotkey",
         }
     }
 }
@@ -237,11 +249,14 @@ struct App {
     screen: Screen,
     devices: Vec<(String, String)>,
     child: Option<std::process::Child>,
-    key_rx: Option<mpsc::Receiver<u16>>,
+    key_rx: Option<mpsc::Receiver<(u16, u8)>>,
     key_target: Option<KeyTarget>,
     find_rx: Option<mpsc::Receiver<String>>,
     find_cancel: Option<Arc<AtomicBool>>,
     key_cancel: Option<Arc<AtomicBool>>,
+    hotkey_rx: Option<mpsc::Receiver<()>>,
+    hotkey_cancel: Option<Arc<AtomicBool>>,
+    hotkey_active: Option<HotkeyBind>,
     status: String,
     tray: Option<ksni::blocking::Handle<ClickerTray>>,
     tray_rx: mpsc::Receiver<TrayAction>,
@@ -281,6 +296,9 @@ impl App {
             find_rx: None,
             find_cancel: None,
             key_cancel: None,
+            hotkey_rx: None,
+            hotkey_cancel: None,
+            hotkey_active: None,
             status: String::new(),
             tray,
             tray_rx,
@@ -292,6 +310,77 @@ impl App {
         if let Some(tray) = &self.tray {
             tray.update(f);
         }
+    }
+
+    fn can_launch(&self) -> bool {
+        !self.theclicker_missing
+            && !self.config.device_name.is_empty()
+            && !(
+                (self.config.enable_lock_unlock && self.config.lock_unlock_bind.is_none())
+                    || (self.config.enable_left && self.config.left_bind.is_none())
+                    || (self.config.enable_middle && self.config.middle_bind.is_none())
+                    || (self.config.enable_right && self.config.right_bind.is_none())
+            )
+    }
+
+
+    //TODO: I LOVE UNSAFE
+    fn start_hotkey_monitor(&mut self, bind: HotkeyBind) {
+        let (tx, rx) = mpsc::channel::<()>();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_clone = cancel.clone();
+        std::thread::spawn(move || {
+            let devices = InputDevice::devices();
+            let mut pollfds: Vec<libc::pollfd> = devices
+                .iter()
+                .map(|d| libc::pollfd {
+                    fd: d.handler.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                })
+                .collect();
+            let mut events: [input_event; 1] = unsafe { std::mem::zeroed() };
+            let mut current_mods: u8 = 0;
+            loop {
+                if cancel_clone.load(Ordering::Relaxed) {
+                    return;
+                }
+                let ret = unsafe {
+                    libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, 100)
+                };
+                if ret < 0 {
+                    return;
+                }
+                for (i, pfd) in pollfds.iter_mut().enumerate() {
+                    if pfd.revents & libc::POLLIN != 0 {
+                        pfd.revents = 0;
+                        if let Ok(len) = devices[i].read(&mut events) {
+                            for event in &events[..len] {
+                                if event.type_ == EV_KEY as u16 {
+                                    let bit = modifier_bit(event.code);
+                                    if bit != 0 {
+                                        if event.value == 1 {
+                                            current_mods |= bit;
+                                        } else if event.value == 0 {
+                                            current_mods &= !bit;
+                                        }
+                                    } else if event.value == 1
+                                        && event.code == bind.key
+                                        && current_mods == bind.mods
+                                    {
+                                        if tx.send(()).is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        self.hotkey_rx = Some(rx);
+        self.hotkey_cancel = Some(cancel);
     }
 
     fn handle_action(&mut self, action: Action) {
@@ -358,47 +447,100 @@ impl App {
                 self.screen = Screen::FindMouse;
             }
             Action::StartCapture(target) => {
-                if self.config.device_name.is_empty() {
+                if target != KeyTarget::HotkeyStartStop && self.config.device_name.is_empty() {
                     self.status = "Select a device first".to_string();
                     return;
                 }
                 let (tx, rx) = mpsc::channel();
                 let stop = Arc::new(AtomicBool::new(false));
                 let stop_clone = stop.clone();
-                let name = clean_name(&self.config.device_name).to_string();
-                std::thread::spawn(move || {
-                    let Some(device) = InputDevice::find_device(&name) else {
-                        return;
-                    };
-                    device.empty_read_buffer();
-                    let mut pollfd = libc::pollfd {
-                        fd: device.handler.as_raw_fd(),
-                        events: libc::POLLIN,
-                        revents: 0,
-                    };
-                    let mut events: [input_event; 1] = unsafe { std::mem::zeroed() };
-                    loop {
-                        if stop_clone.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        let ret = unsafe { libc::poll(&mut pollfd, 1, 100) };
-                        if ret < 0 {
-                            return;
-                        }
-                        if pollfd.revents & libc::POLLIN != 0 {
-                            pollfd.revents = 0;
-                            let Ok(len) = device.read(&mut events) else {
+                if target == KeyTarget::HotkeyStartStop {
+                    std::thread::spawn(move || {
+                        let devices = InputDevice::devices();
+                        let mut pollfds: Vec<libc::pollfd> = devices
+                            .iter()
+                            .map(|d| libc::pollfd {
+                                fd: d.handler.as_raw_fd(),
+                                events: libc::POLLIN,
+                                revents: 0,
+                            })
+                            .collect();
+                        let mut events: [input_event; 1] = unsafe { std::mem::zeroed() };
+                        let mut current_mods: u8 = 0;
+                        loop {
+                            if stop_clone.load(Ordering::Relaxed) {
                                 return;
+                            }
+                            let ret = unsafe {
+                                libc::poll(
+                                    pollfds.as_mut_ptr(),
+                                    pollfds.len() as libc::nfds_t,
+                                    100,
+                                )
                             };
-                            for event in &events[..len] {
-                                if event.type_ == EV_KEY as u16 && event.value == 1 {
-                                    let _ = tx.send(event.code);
-                                    return;
+                            if ret < 0 {
+                                return;
+                            }
+                            for (i, pfd) in pollfds.iter_mut().enumerate() {
+                                if pfd.revents & libc::POLLIN != 0 {
+                                    pfd.revents = 0;
+                                    if let Ok(len) = devices[i].read(&mut events) {
+                                        for event in &events[..len] {
+                                            if event.type_ == EV_KEY as u16 {
+                                                let bit = modifier_bit(event.code);
+                                                if bit != 0 {
+                                                    if event.value == 1 {
+                                                        current_mods |= bit;
+                                                    } else if event.value == 0 {
+                                                        current_mods &= !bit;
+                                                    }
+                                                } else if event.value == 1 {
+                                                    let _ = tx.send((event.code, current_mods));
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
-                    }
-                });
+                    });
+                } else {
+                    let name = clean_name(&self.config.device_name).to_string();
+                    std::thread::spawn(move || {
+                        let Some(device) = InputDevice::find_device(&name) else {
+                            return;
+                        };
+                        device.empty_read_buffer();
+                        let mut pollfd = libc::pollfd {
+                            fd: device.handler.as_raw_fd(),
+                            events: libc::POLLIN,
+                            revents: 0,
+                        };
+                        let mut events: [input_event; 1] = unsafe { std::mem::zeroed() };
+                        loop {
+                            if stop_clone.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            let ret = unsafe { libc::poll(&mut pollfd, 1, 100) };
+                            if ret < 0 {
+                                return;
+                            }
+                            if pollfd.revents & libc::POLLIN != 0 {
+                                pollfd.revents = 0;
+                                let Ok(len) = device.read(&mut events) else {
+                                    return;
+                                };
+                                for event in &events[..len] {
+                                    if event.type_ == EV_KEY as u16 && event.value == 1 {
+                                        let _ = tx.send((event.code, 0u8));
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
                 self.key_rx = Some(rx);
                 self.key_cancel = Some(stop);
                 self.key_target = Some(target);
@@ -535,6 +677,50 @@ fn key_label(code: u16) -> String {
     }
 }
 
+fn modifier_bit(code: u16) -> u8 {
+    match code {
+        29 | 97 => 1,
+        56 | 100 => 2,
+        42 | 54 => 4,
+        125 | 126 => 8,
+        _ => 0,
+    }
+}
+
+fn hotkey_label(bind: &HotkeyBind) -> String {
+    let mut s = String::new();
+    if bind.mods & 1 != 0 { s.push_str("Ctrl+"); }
+    if bind.mods & 8 != 0 { s.push_str("Super+"); }
+    if bind.mods & 2 != 0 { s.push_str("Alt+"); }
+    if bind.mods & 4 != 0 { s.push_str("Shift+"); }
+    s.push_str(&key_label(bind.key));
+    s
+}
+
+fn hotkey_bind_row(ui: &mut egui::Ui, enabled: &mut bool, bind: &mut Option<HotkeyBind>) -> bool {
+    let mut capture = false;
+    ui.horizontal(|ui| {
+        ui.checkbox(enabled, "Start/Stop hotkey");
+        if *enabled {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                let text = bind.as_ref().map(hotkey_label).unwrap_or_else(|| "not set".to_string());
+                ui.label(RichText::new(text).monospace().color(if bind.is_some() {
+                    Color32::GREEN
+                } else {
+                    Color32::from_rgb(180, 100, 100)
+                }));
+                if ui.small_button("Capture").clicked() {
+                    capture = true;
+                }
+                if bind.is_some() && ui.small_button("Clear").clicked() {
+                    *bind = None;
+                }
+            });
+        }
+    });
+    capture
+}
+
 fn bind_row(
     ui: &mut egui::Ui,
     enabled: &mut bool,
@@ -580,6 +766,16 @@ impl eframe::App for App {
             }
         }
 
+        if let Some(rx) = &self.hotkey_rx {
+            if rx.try_recv().is_ok() {
+                match self.screen {
+                    Screen::Running => self.handle_action(Action::Stop),
+                    Screen::Config if self.can_launch() => self.handle_action(Action::Launch),
+                    _ => {}
+                }
+            }
+        }
+
         if self.screen == Screen::FindMouse {
             if let Some(rx) = &self.find_rx {
                 if let Ok(base_name) = rx.try_recv() {
@@ -594,12 +790,15 @@ impl eframe::App for App {
 
         if self.screen == Screen::KeyCapture {
             if let Some(rx) = &self.key_rx {
-                if let Ok(code) = rx.try_recv() {
+                if let Ok((code, mods)) = rx.try_recv() {
                     match self.key_target {
                         Some(KeyTarget::LockUnlock) => self.config.lock_unlock_bind = Some(code),
                         Some(KeyTarget::Left) => self.config.left_bind = Some(code),
                         Some(KeyTarget::Middle) => self.config.middle_bind = Some(code),
                         Some(KeyTarget::Right) => self.config.right_bind = Some(code),
+                        Some(KeyTarget::HotkeyStartStop) => {
+                            self.config.hotkey_bind = Some(HotkeyBind { key: code, mods });
+                        }
                         None => {}
                     }
                     self.key_rx = None;
@@ -839,6 +1038,16 @@ impl eframe::App for App {
                         ) {
                             action = Some(Action::StartCapture(KeyTarget::Right));
                         }
+
+                        ui.separator();
+
+                        if hotkey_bind_row(
+                            ui,
+                            &mut self.config.enable_hotkey,
+                            &mut self.config.hotkey_bind,
+                        ) {
+                            action = Some(Action::StartCapture(KeyTarget::HotkeyStartStop));
+                        }
                     });
 
                     ui.add_space(6.0);
@@ -949,6 +1158,22 @@ impl eframe::App for App {
 
         if let Some(a) = action {
             self.handle_action(a);
+        }
+
+        let target = if self.config.enable_hotkey { self.config.hotkey_bind } else { None };
+        if target != self.hotkey_active {
+            if let Some(cancel) = self.hotkey_cancel.take() {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            self.hotkey_rx = None;
+            self.hotkey_active = target;
+            if let Some(bind) = target {
+                self.start_hotkey_monitor(bind);
+            }
+        }
+
+        if self.hotkey_rx.is_some() && self.screen == Screen::Config {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
     }
 }

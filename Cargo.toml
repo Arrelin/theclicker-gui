@@ -1,6 +1,6 @@
 [package]
 name = "theclicker-gui"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "A graphical frontend for theclicker — a Linux autoclicker for X11 and Wayland"
 license = "MIT"
