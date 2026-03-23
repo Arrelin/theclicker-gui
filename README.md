@@ -30,7 +30,7 @@ cargo install theclicker-gui
 - Configurable cooldown (ms) and press-release gap (ms)
 - System tray icon (SNI) showing current state: idle / locked / clicking
 - Settings are persisted across restarts
-- [0.1.4] Keyboard binging for start/stop theclicker
+- [0.1.4] Keyboard binding for start/stop theclicker
 
 ## Usage
 
