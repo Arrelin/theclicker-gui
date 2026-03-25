@@ -26,6 +26,15 @@ fn init_logger() {
 }
 
 fn main() -> eframe::Result<()> {
+    if std::env::args().any(|a| a == "--backend") {
+        use clap::Parser as _;
+        let filtered: Vec<String> = std::env::args()
+            .filter(|a| a != "--backend")
+            .collect();
+        theclicker::TheClicker::new(theclicker::Args::parse_from(filtered)).main_loop();
+        return Ok(());
+    }
+
     init_logger();
     log::info!("Starting theclicker-gui");
 

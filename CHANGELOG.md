@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.0]
+
+### Changed
+
+- `theclicker` is no longer required as a separate installed binary — the clicker backend is now embedded directly into `theclicker-gui`. Installing `theclicker-gui` is sufficient.
+
 ## [0.1.4]
 
 ### Added

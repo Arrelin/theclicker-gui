@@ -28,7 +28,6 @@ pub struct App {
     status: String,
     tray: Option<ksni::blocking::Handle<ClickerTray>>,
     tray_rx: mpsc::Receiver<TrayAction>,
-    theclicker_missing: bool,
 }
 
 impl App {
@@ -48,12 +47,6 @@ impl App {
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
-        let theclicker_missing = std::process::Command::new("theclicker")
-            .arg("--help")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_err();
         Self {
             config,
             screen: Screen::Config,
@@ -70,7 +63,6 @@ impl App {
             status: String::new(),
             tray,
             tray_rx,
-            theclicker_missing,
         }
     }
 
@@ -101,9 +93,7 @@ impl App {
     }
 
     fn can_launch(&self) -> bool {
-        !self.theclicker_missing
-            && !self.config.device_name.is_empty()
-            && !self.config.missing_binds()
+        !self.config.device_name.is_empty() && !self.config.missing_binds()
     }
 
     fn start_hotkey_monitor(&mut self, bind: HotkeyBind) {
@@ -345,7 +335,12 @@ impl App {
             }
             Action::Launch => {
                 let cfg = &self.config;
-                let mut cmd = std::process::Command::new("theclicker");
+                let Ok(exe) = std::env::current_exe() else {
+                    self.status = "Failed to resolve current executable".to_string();
+                    return;
+                };
+                let mut cmd = std::process::Command::new(exe);
+                cmd.arg("--backend");
                 cmd.arg("run");
                 cmd.arg(format!("-d{}", clean_name(&cfg.device_name)));
                 cmd.arg(format!("-c{}", cfg.cooldown));
@@ -773,22 +768,13 @@ impl eframe::App for App {
 
                     ui.add_space(10.0);
 
-                    if self.theclicker_missing {
-                        ui.add_space(4.0);
-                        ui.group(|ui| {
-                            ui.label(RichText::new("theclicker binary not found in PATH").color(Color32::from_rgb(220, 100, 100)));
-                            ui.label(RichText::new("cargo install theclicker").monospace().color(Color32::YELLOW));
-                        });
-                        ui.add_space(4.0);
-                    }
-
                     let missing_device = self.config.device_name.is_empty();
                     let missing_bind = self.config.missing_binds();
 
                     ui.vertical_centered(|ui| {
                         if ui
                             .add_enabled(
-                                !self.theclicker_missing && !missing_device && !missing_bind,
+                                !missing_device && !missing_bind,
                                 egui::Button::new(RichText::new("  Start  ").size(16.0)),
                             )
                             .clicked()

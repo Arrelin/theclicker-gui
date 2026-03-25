@@ -1,6 +1,6 @@
 [package]
 name = "theclicker-gui"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "A graphical frontend for theclicker — a Linux autoclicker for X11 and Wayland"
 license = "MIT"
@@ -28,3 +28,4 @@ ksni = { version = "0.3.3", default-features = false, features = ["blocking", "a
 libc = "0.2.183"
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
+clap = { version = "4", default-features = false, features = ["std"] }

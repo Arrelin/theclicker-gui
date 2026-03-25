@@ -1,14 +1,10 @@
 # theclicker-gui
 
-A graphical frontend for [theclicker](https://crates.io/crates/theclicker) — a Linux autoclicker that works on X11 and Wayland.
+A graphical Linux autoclicker for X11 and Wayland, powered by [theclicker](https://crates.io/crates/theclicker).
 
 ## Requirements
 
 - Linux (X11 or Wayland)
-- [`theclicker`](https://crates.io/crates/theclicker) must be installed and available in `PATH`:
-  ```bash
-  cargo install theclicker
-  ```
 - Access to `/dev/input/` and `/dev/uinput` — typically requires the user to be in the `input` and `uinput` groups:
   ```bash
   sudo usermod -aG input,uinput $USER
@@ -30,7 +26,7 @@ cargo install theclicker-gui
 - Configurable cooldown (ms) and press-release gap (ms)
 - System tray icon (SNI) showing current state: idle / locked / clicking
 - Settings are persisted across restarts
-- [0.1.4] Keyboard binding for start/stop theclicker
+- Global Start/Stop hotkey (keyboard binding to toggle the clicker from anywhere)
 
 ## Usage
 
