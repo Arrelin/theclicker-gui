@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.0]
+
+### Added
+
+- Added checkbox in settings — removes the 25 ms minimum cooldown limit for systems that can handle higher click rates
+
 ## [0.3.0]
 
 ### Changed

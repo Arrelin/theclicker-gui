@@ -734,20 +734,32 @@ impl eframe::App for App {
                             }
                         });
 
+                        if ui.checkbox(&mut self.config.no_min_delay, "My system can go faster").changed()
+                            && !self.config.no_min_delay
+                        {
+                            self.config.cooldown = self.config.cooldown.max(25);
+                        }
+
                         ui.add_space(4.0);
 
                         egui::Grid::new("settings_grid")
                             .num_columns(2)
                             .spacing([8.0, 4.0])
                             .show(ui, |ui| {
-                                ui.label("Cooldown (ms, min 25):");
+                                let cooldown_label = if self.config.no_min_delay {
+                                    "Cooldown (ms):"
+                                } else {
+                                    "Cooldown (ms, min 25):"
+                                };
+                                ui.label(cooldown_label);
                                 let mut s = self.config.cooldown.to_string();
                                 if ui
                                     .add(egui::TextEdit::singleline(&mut s).desired_width(60.0))
                                     .changed()
                                 {
                                     if let Ok(v) = s.parse::<u64>() {
-                                        self.config.cooldown = v.max(25);
+                                        let min = if self.config.no_min_delay { 1 } else { 25 };
+                                        self.config.cooldown = v.max(min);
                                     }
                                 }
                                 ui.end_row();

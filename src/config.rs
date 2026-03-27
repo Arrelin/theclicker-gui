@@ -20,6 +20,7 @@ pub struct Config {
     pub right_bind: Option<u16>,
     pub hold: bool,
     pub grab: bool,
+    pub no_min_delay: bool,
     pub enable_hotkey: bool,
     pub hotkey_bind: Option<HotkeyBind>,
 }
@@ -37,7 +38,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             device_name: String::new(),
-            cooldown: 25,
+            cooldown: 1,
             cooldown_press_release: 0,
             enable_lock_unlock: false,
             lock_unlock_bind: None,
@@ -49,6 +50,7 @@ impl Default for Config {
             right_bind: None,
             hold: true,
             grab: true,
+            no_min_delay: false,
             enable_hotkey: false,
             hotkey_bind: None,
         }
