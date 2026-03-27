@@ -44,6 +44,6 @@ theclicker-gui
 
 ## Notes
 
-- Minimum cooldown is 25 ms (~40 clicks/sec), which is the Linux kernel limit for uinput events
+- Minimum cooldown is 25 ms (~40 clicks/sec), which is the Linux kernel limit for uinput events (some kernels bypass that, like cachyos, etc)
 - Grab mode may softlock input if your compositor does not recognize the virtual device created by theclicker
 - The system tray icon requires a compositor or panel that supports the StatusNotifierItem (SNI) protocol (KDE Plasma, waybar, etc.)
